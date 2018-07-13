@@ -7,6 +7,24 @@ type Kubernetes interface {
 	ListPods(labels map[string]string) (*PodList, error)
 	UpdatePod(podName string, pod *Pod) (*Pod, error)
 	WatchPods(labels map[string]string) (watch.Watch, error)
+
+	// extensions to enable cleaner register/deregister
+	CreateSecret(name string, secret *Secret) (*Secret, error)
+	GetSecret(name string) (*Secret, error)
+	DeleteSecret(name string) error
+	ListSecrets(labels map[string]string) (*SecretList, error)
+	WatchSecrets(labels map[string]string) (watch.Watch, error)
+}
+
+// Secret contains service level metadata and data
+type Secret struct {
+	Metadata *Meta             `json:"metadata"`
+	Data     map[string]string `json:"data"`
+}
+
+// SecretList ...
+type SecretList struct {
+	Items []Secret `json:"items"`
 }
 
 // PodList ...

@@ -11,6 +11,8 @@ import (
 	"github.com/micro/go-log"
 	"github.com/micro/go-plugins/registry/kubernetes/client/api"
 	"github.com/micro/go-plugins/registry/kubernetes/client/watch"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
@@ -128,4 +130,43 @@ func NewClientInCluster() Kubernetes {
 			BearerToken: &t,
 		},
 	}
+}
+
+// GetClientConfig return rest config, if path not specified, assume in cluster config
+func GetClientConfig(masterURL, kubeconfig string) (*rest.Config, error) {
+	if kubeconfig != "" || masterURL != "" {
+		return clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
+	}
+	return rest.InClusterConfig()
+}
+
+// CreateSecret ...
+func (c *client) CreateSecret(name string, s *Secret) (*Secret, error) {
+	var secret Secret
+	err := api.NewRequest(c.opts).Put().Resource("secrets").Name(name).Body(s).Do().Into(&secret)
+	return &secret, err
+}
+
+// DeleteSecret ...
+func (c *client) DeleteSecret(name string) error {
+	return api.NewRequest(c.opts).Delete().Resource("secrets").Name(name).Do().Error()
+}
+
+// GetSecret ...
+func (c *client) GetSecret(name string) (*Secret, error) {
+	var secret Secret
+	err := api.NewRequest(c.opts).Get().Resource("secrets").Name(name).Do().Into(&secret)
+	return &secret, err
+}
+
+// ListSecrets ...
+func (c *client) ListSecrets(labels map[string]string) (*SecretList, error) {
+	var secrets SecretList
+	err := api.NewRequest(c.opts).Get().Resource("secrets").Params(&api.Params{LabelSelector: labels}).Do().Into(&secrets)
+	return &secrets, err
+}
+
+// WatchSecrets ...
+func (c *client) WatchSecrets(labels map[string]string) (watch.Watch, error) {
+	return api.NewRequest(c.opts).Get().Resource("secrets").Params(&api.Params{LabelSelector: labels}).Watch()
 }

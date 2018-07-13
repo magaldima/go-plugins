@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/micro/go-log"
 	"github.com/micro/go-plugins/registry/kubernetes/client"
 
 	"github.com/micro/go-micro/cmd"
@@ -22,7 +23,7 @@ type kregistry struct {
 	options registry.Options
 }
 
-var (
+const (
 	// used on pods as labels & services to select
 	// eg: svcSelectorPrefix+"svc.name"
 	svcSelectorPrefix = "micro.mu/selector-"
@@ -35,15 +36,21 @@ var (
 	// micro service by pod name
 	annotationServiceKeyPrefix = "micro.mu/service-"
 
+	// used on k8s services to scope a serialized
+	// micro service
+	dataServiceKeyPrefix = "micro.mu/service-"
+
 	// Pod status
 	podRunning = "Running"
+)
 
+var (
 	// label name regex
 	labelRe = regexp.MustCompilePOSIX("[-A-Za-z0-9_.]")
 )
 
-// podSelector
-var podSelector = map[string]string{
+// secretSelector
+var secretSelector = map[string]string{
 	labelTypeKey: labelTypeValueService,
 }
 
@@ -73,6 +80,7 @@ func (c *kregistry) Options() registry.Options {
 
 // Register sets a service selector label and an annotation with a
 // serialised version of the service passed in.
+// each service has a secret, we need to create one here to register
 func (c *kregistry) Register(s *registry.Service, opts ...registry.RegisterOption) error {
 	if len(s.Nodes) == 0 {
 		return errors.New("you must register at least one node")
@@ -80,7 +88,7 @@ func (c *kregistry) Register(s *registry.Service, opts ...registry.RegisterOptio
 
 	// TODO: grab podname from somewhere better than this.
 	podName := os.Getenv("HOSTNAME")
-	svcName := s.Name
+	svcName := serviceName(s.Name)
 
 	// encode micro service
 	b, err := json.Marshal(s)
@@ -89,24 +97,23 @@ func (c *kregistry) Register(s *registry.Service, opts ...registry.RegisterOptio
 	}
 	svc := string(b)
 
-	pod := &client.Pod{
+	secret := &client.Secret{
 		Metadata: &client.Meta{
+			Name: podName,
 			Labels: map[string]*string{
-				labelTypeKey:                             &labelTypeValueService,
-				svcSelectorPrefix + serviceName(svcName): &svcSelectorValue,
+				labelTypeKey:                &labelTypeValueService,
+				svcSelectorPrefix + svcName: &svcSelectorValue,
 			},
-			Annotations: map[string]*string{
-				annotationServiceKeyPrefix + serviceName(svcName): &svc,
-			},
+		},
+		Data: map[string]string{
+			dataServiceKeyPrefix + svcName: svc,
 		},
 	}
 
-	if _, err := c.client.UpdatePod(podName, pod); err != nil {
+	if _, err := c.client.CreateSecret(podName, secret) != nil {
 		return err
 	}
-
 	return nil
-
 }
 
 // Deregister nils out any things set in Register
@@ -117,51 +124,31 @@ func (c *kregistry) Deregister(s *registry.Service) error {
 
 	// TODO: grab podname from somewhere better than this.
 	podName := os.Getenv("HOSTNAME")
-	svcName := s.Name
 
-	pod := &client.Pod{
-		Metadata: &client.Meta{
-			Labels: map[string]*string{
-				svcSelectorPrefix + serviceName(svcName): nil,
-			},
-			Annotations: map[string]*string{
-				annotationServiceKeyPrefix + serviceName(svcName): nil,
-			},
-		},
-	}
-
-	if _, err := c.client.UpdatePod(podName, pod); err != nil {
+	if err := c.client.DeleteSecret(podName); err != nil {
 		return err
 	}
-
 	return nil
-
 }
 
 // GetService will get all the pods with the given service selector,
 // and build services from the annotations.
 func (c *kregistry) GetService(name string) ([]*registry.Service, error) {
-	pods, err := c.client.ListPods(map[string]string{
-		svcSelectorPrefix + serviceName(name): svcSelectorValue,
+	svcName := serviceName(name)
+	secrets, err := c.client.ListSecrets(map[string]string{
+		svcSelectorPrefix + svcName: svcSelectorValue,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	if len(pods.Items) == 0 {
+	if len(secrets.Items) == 0 {
 		return nil, registry.ErrNotFound
 	}
 
-	// svcs mapped by version
-	svcs := make(map[string]*registry.Service)
-
-	// loop through items
-	for _, pod := range pods.Items {
-		if pod.Status.Phase != podRunning {
-			continue
-		}
-		// get serialised service from annotation
-		svcStr, ok := pod.Metadata.Annotations[annotationServiceKeyPrefix+serviceName(name)]
+	svcs := make([]*registry.Service, 0)
+	for i, secret := range secrets.Items {
+		svcStr, ok := secret.Data[dataServiceKeyPrefix + svcName]
 		if !ok {
 			continue
 		}
@@ -172,27 +159,14 @@ func (c *kregistry) GetService(name string) ([]*registry.Service, error) {
 		if err != nil {
 			return nil, fmt.Errorf("could not unmarshal service '%s' from pod annotation", name)
 		}
-
-		// merge up pod service & ip with versioned service.
-		vs, ok := svcs[svc.Version]
-		if !ok {
-			svcs[svc.Version] = &svc
-			continue
-		}
-
-		vs.Nodes = append(vs.Nodes, svc.Nodes...)
+		svcs = append(svcs, &svc)
 	}
-
-	var list []*registry.Service
-	for _, val := range svcs {
-		list = append(list, val)
-	}
-	return list, nil
+	return svcs, nil
 }
 
 // ListServices will list all the service names
 func (c *kregistry) ListServices() ([]*registry.Service, error) {
-	pods, err := c.client.ListPods(podSelector)
+	secrets, err := c.client.ListSecrets(secretSelector)
 	if err != nil {
 		return nil, err
 	}
@@ -200,12 +174,9 @@ func (c *kregistry) ListServices() ([]*registry.Service, error) {
 	// svcs mapped by name
 	svcs := make(map[string]bool)
 
-	for _, pod := range pods.Items {
-		if pod.Status.Phase != podRunning {
-			continue
-		}
-		for k, v := range pod.Metadata.Annotations {
-			if !strings.HasPrefix(k, annotationServiceKeyPrefix) {
+	for _, secret := range secrets.Items {
+		for k, v := range secret.Metadata.Annotations {
+			if !strings.HasPrefix(k, dataServiceKeyPrefix) {
 				continue
 			}
 
@@ -244,9 +215,9 @@ func NewRegistry(opts ...registry.Option) registry.Registry {
 	}
 
 	// get first host
-	var host string
+	var masterURL string
 	if len(options.Addrs) > 0 && len(options.Addrs[0]) > 0 {
-		host = options.Addrs[0]
+		masterURL = options.Addrs[0]
 	}
 
 	if options.Timeout == 0 {
@@ -254,6 +225,12 @@ func NewRegistry(opts ...registry.Option) registry.Registry {
 	}
 
 	// if no hosts setup, assume InCluster
+	/*
+	rest, err := client.GetClientConfig(masterURL, "")
+	if err != nil {
+		log.Fatal(errors.New("unable to get k8s client config"))
+	}
+	*/
 	var c client.Kubernetes
 	if len(host) == 0 {
 		c = client.NewClientInCluster()
