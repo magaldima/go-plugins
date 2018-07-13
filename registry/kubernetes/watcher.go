@@ -111,7 +111,6 @@ func newWatcher(kr *kregistry, opts ...registry.WatchOption) (registry.Watcher, 
 		registry: kr,
 		watcher:  watcher,
 		next:     make(chan *registry.Result),
-		secrets:  make(map[string]*client.Secret),
 	}
 
 	// range over watch request changes, and invoke

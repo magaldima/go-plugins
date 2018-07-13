@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/micro/go-log"
 	"github.com/micro/go-plugins/registry/kubernetes/client"
 
 	"github.com/micro/go-micro/cmd"
@@ -23,7 +22,7 @@ type kregistry struct {
 	options registry.Options
 }
 
-const (
+var (
 	// used on pods as labels & services to select
 	// eg: svcSelectorPrefix+"svc.name"
 	svcSelectorPrefix = "micro.mu/selector-"
@@ -95,7 +94,6 @@ func (c *kregistry) Register(s *registry.Service, opts ...registry.RegisterOptio
 	if err != nil {
 		return err
 	}
-	svc := string(b)
 
 	secret := &client.Secret{
 		Metadata: &client.Meta{
@@ -105,12 +103,12 @@ func (c *kregistry) Register(s *registry.Service, opts ...registry.RegisterOptio
 				svcSelectorPrefix + svcName: &svcSelectorValue,
 			},
 		},
-		Data: map[string]string{
-			dataServiceKeyPrefix + svcName: svc,
+		Data: map[string][]byte{
+			dataServiceKeyPrefix + svcName: b,
 		},
 	}
 
-	if _, err := c.client.CreateSecret(podName, secret) != nil {
+	if _, err := c.client.CreateSecret(podName, secret); err != nil {
 		return err
 	}
 	return nil
@@ -147,15 +145,15 @@ func (c *kregistry) GetService(name string) ([]*registry.Service, error) {
 	}
 
 	svcs := make([]*registry.Service, 0)
-	for i, secret := range secrets.Items {
-		svcStr, ok := secret.Data[dataServiceKeyPrefix + svcName]
+	for _, secret := range secrets.Items {
+		svcBytes, ok := secret.Data[dataServiceKeyPrefix+svcName]
 		if !ok {
 			continue
 		}
 
 		// unmarshal service string
 		var svc registry.Service
-		err := json.Unmarshal([]byte(*svcStr), &svc)
+		err := json.Unmarshal(svcBytes, &svc)
 		if err != nil {
 			return nil, fmt.Errorf("could not unmarshal service '%s' from pod annotation", name)
 		}
@@ -183,7 +181,7 @@ func (c *kregistry) ListServices() ([]*registry.Service, error) {
 			// we have to unmarshal the annotation itself since the
 			// key is encoded to match the regex restriction.
 			var svc registry.Service
-			if err := json.Unmarshal([]byte(*v), &svc); err != nil {
+			if err := json.Unmarshal(v, &svc); err != nil {
 				continue
 			}
 			svcs[svc.Name] = true
@@ -226,16 +224,16 @@ func NewRegistry(opts ...registry.Option) registry.Registry {
 
 	// if no hosts setup, assume InCluster
 	/*
-	rest, err := client.GetClientConfig(masterURL, "")
-	if err != nil {
-		log.Fatal(errors.New("unable to get k8s client config"))
-	}
+		rest, err := client.GetClientConfig(masterURL, "")
+		if err != nil {
+			log.Fatal(errors.New("unable to get k8s client config"))
+		}
 	*/
 	var c client.Kubernetes
-	if len(host) == 0 {
+	if len(masterURL) == 0 {
 		c = client.NewClientInCluster()
 	} else {
-		c = client.NewClientByHost(host)
+		c = client.NewClientByHost(masterURL)
 	}
 
 	return &kregistry{

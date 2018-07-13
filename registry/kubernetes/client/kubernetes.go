@@ -18,8 +18,8 @@ type Kubernetes interface {
 
 // Secret contains service level metadata and data
 type Secret struct {
-	Metadata *Meta             `json:"metadata"`
-	Data     map[string]string `json:"data"`
+	Metadata *Meta          `json:"metadata"`
+	Data     [string][]byte `json:"data"`
 }
 
 // SecretList ...
